@@ -1,0 +1,7 @@
+requirements文件夹
+1.common.txt是放入所有开发中用到的第三方模块,需要使用时去进行下载,目前考虑到版本的变化,没有写版本,后续可以下载时写上最新的即可;
+2.prod.txt是生产环境用到的模块;
+3.dev.txt开发环境中用到的模块;
+
+pip freeze > requirements.txt将包依赖信息保存在requirements.txt文件
+pip install -r requirements.txt会自动从网上下载并安装所有包
