@@ -5,10 +5,11 @@ from . import db
 from flask_login import UserMixin, AnonymousUserMixin
 from . import login_manager
 from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
-from flask import current_app, request
+from flask import current_app, request, url_for
 import hashlib
 from markdown import markdown
 import bleach
+from app.exceptions import ValidationError
 
 
 """
@@ -55,6 +56,7 @@ class User(UserMixin, db.Model):
     # img 散列值
     avatar_hash = db.Column(db.String(32))
     posts = db.relationship('Post', backref='author', lazy="dynamic")
+    comments = db.relationship('Comment', backref='author', lazy='dynamic')
 
     """
         1.为了消除外键间的歧义，定义关系时必须使用可选参数foreign_keys指定的外键
@@ -82,9 +84,10 @@ class User(UserMixin, db.Model):
                 self.role = Role.query.filter_by(permissions=0xff).first()
             else:
                 self.role = Role.query.filter_by(default=True).first()
-
         if self.email is not None and self.avatar_hash is None:
             self.avatar_hash = hashlib.md5(self.email.encode('utf-8')).hexdigest()
+        # 自己关注自己,为了在显示关注别人博客的同时,也显示自己的博客
+        self.followed.append(Follow(followed=self))
 
     @property
     def password(self):
@@ -148,6 +151,7 @@ class User(UserMixin, db.Model):
         return True
 
     def gravatar(self, size=100, default='identicon', rating='g'):
+        """ 获取头像的方法 """
         if request.is_secure:
             url = 'https://secure.gravatar.com/avatar'
         else:
@@ -196,9 +200,90 @@ class User(UserMixin, db.Model):
         """ 搜索指定关注者用户，如果找到了就返回True """
         return self.followers.filter_by(follower_id=user.id).first() is not None
 
+    """ 关注用户所发的博客 """
+    @property
+    def followed_posts(self):
+        return Post.query.join(Follow, Follow.followed_id == Post.author_id) \
+                .filter(Follow.follower_id == self.id)
+
+    """ 更新原有数据库,增加内容 """
+    @staticmethod
+    def add_self_follows():
+        for user in User.query.all():
+            if not user.is_following(user):
+                user.follow(user)
+                db.session.add(user)
+                db.session.commit()
+
+    def generate_auth_token(self, expiration):
+        s = Serializer(current_app.config['SECRET_KEY'], expires_in=expiration)
+        return s.dumps({'id': self.id})
+
+    @staticmethod
+    def verify_auth_token(token):
+        s = Serializer(current_app.config['SECRET_KEY'])
+        try:
+            data = s.loads(token)
+        except:
+            return None
+        return User.query.get(data['id'])
+
+    def to_json(self):
+        json_user = {
+            'url': url_for('api.get_post', id=self.id, _external=True),
+            'username': self.username,
+            'member_since': self.member_since,
+            'last_seen': self.last_seen,
+            'posts': url_for('api.get_user_posts', id=self.id, _external=True),
+            'followed_posts': url_for('api.get_user_followed_posts', id=self.id, _external=True),
+            'post_count': self.posts.count()
+        }
+        return json_user
+
+
+class Comment(db.Model):
+    """ 评论 """
+    __tablename__ = 'comments'
+    id = db.Column(db.Integer, primary_key=True)
+    body = db.Column(db.Text)
+    body_html = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
+    # 协管员查是否禁不当评论
+    disabled = db.Column(db.Boolean)
+    author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    post_id = db.Column(db.Integer, db.ForeignKey('posts.id'))
+
+    @staticmethod
+    def on_changed_body(target, value, oldvalue, initiator):
+        allowed_tags = ['a', 'abbr', 'acronym', 'b', 'code', 'em', 'i',
+                        'strong']
+        target.body_html = bleach.linkify(bleach.clean(
+            markdown(value, output_format='html'),
+            tags=allowed_tags, strip=True))
+
+    def to_json(self):
+        json_comment = {
+            'url': url_for('api.get_comment', id=self.id, _external=True),
+            'post': url_for('api.get_post', id=self.post_id, _external=True),
+            'body': self.body,
+            'body_html': self.body_html,
+            'timestamp': self.timestamp,
+            'author': url_for('api.get_user', id=self.author_id, _external=True),
+        }
+        return json_comment
+
+    @staticmethod
+    def from_json(json_comment):
+        body = json_comment.get('body')
+        if body is None or body == '':
+            raise ValidationError('comment does not have a body')
+        return Comment(body=body)
+
+db.event.listen(Comment.body, 'set', Comment.on_changed_body)
+
 
 """
-                                用户角色
+                                用户角色权限
     用户角色            权  限                        说  明
     匿名           0b00000000(0x00)        未登录的用户。在程序中只有阅读权限
     用户           0b00000111(0x07)        具有发布文章、发表评论和关注其他用户的权限。这是新用户的默认角色
@@ -263,6 +348,7 @@ class Post(db.Model):
     timestamp = db.Column(db.DateTime, index=True, default=datetime.now)
     author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     body_html = db.Column(db.Text)
+    comments = db.relationship('Comment', backref='post', lazy='dynamic')
 
     @staticmethod
     def generate_fake(count=100):
@@ -280,6 +366,28 @@ class Post(db.Model):
             db.session.add(p)
             db.session.commit()
 
+    def to_json(self):
+        """ 生成json数据 """
+        # url_for 中添加了_external = True表示绝对路径
+        json_post = {
+            'url': url_for('api.get_post', id=self.id, _external=True),
+            'body': self.body,
+            'body_html': self.body_html,
+            'timestamp': self.timestamp,
+            'author': url_for('api.get_user', id=self.author_id, _external=True),
+            'comments': url_for('api.get_post_comments', id=self.id, _external=True),
+            'comment_count': self.comments.count()
+        }
+        return json_post
+
+    @staticmethod
+    def from_json(json_post):
+        """ 转化json数据模型 """
+        body = json_post.get('body')
+        if body is None or body == '':
+            raise ValidationError('post does not have a body')
+        return Post(body=body)
+
     # linkify把url转换成a标签
     @staticmethod
     def on_changed_body(target, value, oldvalue, initiator):
@@ -287,6 +395,7 @@ class Post(db.Model):
                         'ol', 'pre', 'strong', 'ul', 'h1', 'h2', 'h3', 'p']
         target.body_html = bleach.linkify(bleach.clean(markdown(value, output_format='html'),
                                             tags=allowed_tags, strip=True))
+
 
 db.event.listen(Post.body, 'set', Post.on_changed_body)
 

@@ -24,7 +24,7 @@ class Config(object):
     FLASKY_MAIL_SUBJECT_PREFIX = '[Flasky]'
     FLASKY_MAIL_SENDER = 'lvhaidong520@163.com'
     FLASKY_ADMIN = 'lvhaidong520@163.com'
-    FLASKY_POSTS_PER_PAGE = 20
+    FLASKY_POSTS_PER_PAGE = 10
     FLASKY_FOLLOWERS_PER_PAGE = 50
     FLASKY_COMMENTS_PER_PAGE = 30
     FLASKY_SLOW_DB_QUERY_TIME = 0.5
@@ -43,6 +43,7 @@ class DevelopmentConfig(Config):
 class TestingConfig(Config):
     """测试环境"""
     TESTING = True
+    WTF_CSRF_ENABLED = False
     SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(basedir, 'data-test.sqlite')
 
 
